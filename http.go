@@ -44,7 +44,8 @@ func HTTPSDPServer() chan string {
 	http.Handle("/", http.FileServer(http.Dir("./client")))
 
 	go func() {
-		err := http.ListenAndServe(":"+strconv.Itoa(*port), nil)
+		//err := http.ListenAndServe(":"+strconv.Itoa(*port), nil)
+		err := http.ListenAndServeTLS(":"+strconv.Itoa(*port), "./full_chain.pem", "./private.key", nil)
 		if err != nil {
 			panic(err)
 		}

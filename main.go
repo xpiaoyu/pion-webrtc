@@ -10,15 +10,17 @@ import (
 	"github.com/pion/webrtc/v2"
 )
 
+// 52.68.64.213
+// mv.piaoyu.org
 var peerConnectionConfig = webrtc.Configuration{
 	ICEServers: []webrtc.ICEServer{
 		{
-			URLs:       []string{"turn:52.68.64.213:3478"},
+			URLs:       []string{"turn:mv.piaoyu.org:3478"},
 			Username:   "test",
 			Credential: "test",
 		},
 	},
-	//SDPSemantics: webrtc.SDPSemanticsPlanB,
+	SDPSemantics: webrtc.SDPSemanticsUnifiedPlanWithFallback,
 }
 
 const (
@@ -179,16 +181,6 @@ func main2() {
 	localTrack2 := <-localTrackChan
 	log.Println("[+] Got track 2")
 
-	clientPcConfig := webrtc.Configuration{
-		ICEServers: []webrtc.ICEServer{
-			{
-				URLs:       []string{"turn:52.68.64.213:3478"},
-				Username:   "test",
-				Credential: "test",
-			},
-		},
-		//SDPSemantics: webrtc.SDPSemanticsPlanB,
-	}
 	for !restart {
 		log.Println("Curl an base64 SDP to start send-only peer connection")
 		log.Println("Waiting next receiver...")
@@ -214,7 +206,7 @@ func main2() {
 		log.Println("[+] Offer:\r\n", recvOnlyOffer)
 
 		// Create a new PeerConnection
-		peerConnection, err := api.NewPeerConnection(clientPcConfig)
+		peerConnection, err := api.NewPeerConnection(peerConnectionConfig)
 		if err != nil {
 			log.Println(err)
 			continue
