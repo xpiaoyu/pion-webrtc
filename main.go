@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/pion/rtp/codecs"
+	"github.com/pion/sdp/v2"
 	"io"
 	"log"
 	"time"
@@ -61,10 +62,11 @@ func main2() {
 
 	// Setup the codecs you want to use.
 	// Only support VP8, this makes our proxying code simpler
-	m.RegisterCodec(MyRTPH264Codec(webrtc.DefaultPayloadTypeH264, 90000))
+	//m.RegisterCodec(MyRTPH264Codec(96, 90000))
 	m.RegisterCodec(webrtc.NewRTPVP8Codec(webrtc.DefaultPayloadTypeVP8, 90000))
+	//m.RegisterCodec(webrtc.NewRTPVP8Codec(100, 90000))
 	m.RegisterCodec(webrtc.NewRTPOpusCodec(webrtc.DefaultPayloadTypeOpus, 48000))
-	m.RegisterCodec(webrtc.NewRTPG722Codec(webrtc.DefaultPayloadTypeG722, 8000))
+	//m.RegisterCodec(webrtc.NewRTPG722Codec(webrtc.DefaultPayloadTypeG722, 8000))
 	//m.RegisterDefaultCodecs()
 
 	// Create the API object with the MediaEngine
@@ -115,7 +117,7 @@ func main2() {
 	peerConnection.OnTrack(func(remoteTrack *webrtc.Track, receiver *webrtc.RTPReceiver) {
 		// Send a PLI on an interval so that the publisher is pushing a keyframe every rtcpPLIInterval
 		// This can be less wasteful by processing incoming RTCP events, then we would emit a NACK/PLI when a viewer requests it
-		log.Print("[+] OnTrack remoteTrack:", remoteTrack)
+		log.Print("[+] OnTrack remoteTrack:", remoteTrack, "payloadType:", remoteTrack.PayloadType())
 		go func() {
 			ticker := time.NewTicker(rtcpPLIInterval)
 			for range ticker.C {
@@ -205,6 +207,12 @@ func main2() {
 		Decode(output, &recvOnlyOffer)
 		log.Println("[+] Offer:\r\n", recvOnlyOffer)
 
+		parsed := sdp.SessionDescription{}
+		if err := parsed.Unmarshal([]byte(recvOnlyOffer.SDP)); err != nil {
+			log.Println("[ERROR]", err)
+			continue
+		}
+
 		// Create a new PeerConnection
 		peerConnection, err := api.NewPeerConnection(peerConnectionConfig)
 		if err != nil {
@@ -253,6 +261,10 @@ func main2() {
 			continue
 		}
 		log.Println("[+] Answer:\r\n", answer)
+
+		mediaDescriptionLen := len(parsed.MediaDescriptions)
+		log.Println("[+] parsed MD length:", mediaDescriptionLen)
+		log.Println("[+] MD[0]:", parsed.MediaDescriptions[0].MediaName.Media)
 
 		// Get the LocalDescription and take it to base64 so we can paste in browser
 		localDesc := Encode(answer)
