@@ -1,10 +1,13 @@
 package main
 
 import (
+	"github.com/pion/rtp"
 	"github.com/pion/rtp/codecs"
 	"github.com/pion/sdp/v2"
 	"io"
 	"log"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/pion/rtcp"
@@ -26,6 +29,7 @@ var peerConnectionConfig = webrtc.Configuration{
 
 const (
 	rtcpPLIInterval = time.Second * 3
+	h264Fmtp        = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
 )
 
 var respChan = make(chan string)
@@ -33,6 +37,10 @@ var respChan = make(chan string)
 var restart = false
 
 var sdpChan chan string
+
+var broadcastVideoName string
+
+var receiverTacks []*webrtc.Track
 
 func main() {
 	sdpChan = HTTPSDPServer()
@@ -44,15 +52,31 @@ func main() {
 	}
 }
 
-func MyRTPH264Codec(payloadType uint8, clockrate uint32) *webrtc.RTPCodec {
+func MyRTPH264Codec(payloadType uint8, clockRate uint32) *webrtc.RTPCodec {
 	c := webrtc.NewRTPCodec(webrtc.RTPCodecTypeVideo,
 		"H264",
-		clockrate,
+		clockRate,
 		0,
-		"level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+		h264Fmtp,
 		payloadType,
 		&codecs.H264Payloader{})
 	return c
+}
+
+// DefaultPayloadTypeVP8  = 96
+// DefaultPayloadTypeVP9  = 98
+// DefaultPayloadTypeH264 = 102
+func getMediaNameByPayloadType(payloadType uint8) string {
+	switch payloadType {
+	case 96:
+		return "VP8"
+	case 98:
+		return "VP9"
+	case 102:
+		return "H264"
+	default:
+		return "VP8"
+	}
 }
 
 func main2() {
@@ -62,7 +86,7 @@ func main2() {
 
 	// Setup the codecs you want to use.
 	// Only support VP8, this makes our proxying code simpler
-	//m.RegisterCodec(MyRTPH264Codec(96, 90000))
+	m.RegisterCodec(MyRTPH264Codec(webrtc.DefaultPayloadTypeH264, 90000))
 	m.RegisterCodec(webrtc.NewRTPVP8Codec(webrtc.DefaultPayloadTypeVP8, 90000))
 	//m.RegisterCodec(webrtc.NewRTPVP8Codec(100, 90000))
 	m.RegisterCodec(webrtc.NewRTPOpusCodec(webrtc.DefaultPayloadTypeOpus, 48000))
@@ -117,34 +141,62 @@ func main2() {
 	peerConnection.OnTrack(func(remoteTrack *webrtc.Track, receiver *webrtc.RTPReceiver) {
 		// Send a PLI on an interval so that the publisher is pushing a keyframe every rtcpPLIInterval
 		// This can be less wasteful by processing incoming RTCP events, then we would emit a NACK/PLI when a viewer requests it
-		log.Print("[+] OnTrack remoteTrack:", remoteTrack, "payloadType:", remoteTrack.PayloadType())
-		go func() {
-			ticker := time.NewTicker(rtcpPLIInterval)
-			for range ticker.C {
-				if rtcpSendErr := peerConnection.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: remoteTrack.SSRC()}}); rtcpSendErr != nil {
-					log.Println(rtcpSendErr)
+		log.Println("[+] OnTrack remoteTrack:", remoteTrack)
+		log.Printf("[+] Remote track codec name:[%s] payloadType:[%d]", remoteTrack.Codec().Name, remoteTrack.Codec().PayloadType)
+
+		if remoteTrack.PayloadType() == webrtc.DefaultPayloadTypeVP8 || remoteTrack.PayloadType() == webrtc.DefaultPayloadTypeVP9 ||
+			remoteTrack.PayloadType() == webrtc.DefaultPayloadTypeH264 {
+			broadcastVideoName = remoteTrack.Codec().Name
+			log.Printf("[+] Video codec name:[%s]", broadcastVideoName)
+			go func() {
+				ticker := time.NewTicker(rtcpPLIInterval)
+				for range ticker.C {
+					if rtcpSendErr := peerConnection.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: remoteTrack.SSRC()}}); rtcpSendErr != nil {
+						log.Println("[ERROR]", rtcpSendErr)
+					}
+				}
+			}()
+
+			// Create a local track, all our SFU clients will be fed via this track remoteTrack.PayloadType()
+			localTrack, newTrackErr := peerConnection.NewTrack(remoteTrack.PayloadType(), remoteTrack.SSRC(), "video", "pion")
+
+			if newTrackErr != nil {
+				panic(newTrackErr)
+			}
+			log.Print("[+] Created new local track:", localTrack)
+			localTrackChan <- localTrack
+
+			rtpBuf := make([]byte, 1400)
+			for {
+				i, readErr := remoteTrack.Read(rtpBuf)
+				if readErr != nil {
+					panic(readErr)
+				}
+
+				// ErrClosedPipe means we don't have any subscribers, this is ok if no peers have connected yet
+				if _, err = localTrack.Write(rtpBuf[:i]); err != nil && err != io.ErrClosedPipe {
+					panic(err)
 				}
 			}
-		}()
-
-		// Create a local track, all our SFU clients will be fed via this track
-		localTrack, newTrackErr := peerConnection.NewTrack(remoteTrack.PayloadType(), remoteTrack.SSRC(), "video", "pion")
-		if newTrackErr != nil {
-			panic(newTrackErr)
-		}
-		log.Print("[+] Created new local track:", localTrack)
-		localTrackChan <- localTrack
-
-		rtpBuf := make([]byte, 1400)
-		for {
-			i, readErr := remoteTrack.Read(rtpBuf)
-			if readErr != nil {
-				panic(readErr)
+		} else {
+			localTrack, newTrackErr := peerConnection.NewTrack(remoteTrack.PayloadType(), remoteTrack.SSRC(), "audio", "pion")
+			if newTrackErr != nil {
+				panic(newTrackErr)
 			}
+			log.Print("[+] Created new local track:", localTrack)
+			localTrackChan <- localTrack
 
-			// ErrClosedPipe means we don't have any subscribers, this is ok if no peers have connected yet
-			if _, err = localTrack.Write(rtpBuf[:i]); err != nil && err != io.ErrClosedPipe {
-				panic(err)
+			rtpBuf := make([]byte, 1400)
+			for {
+				i, readErr := remoteTrack.Read(rtpBuf)
+				if readErr != nil {
+					panic(readErr)
+				}
+
+				// ErrClosedPipe means we don't have any subscribers, this is ok if no peers have connected yet
+				if _, err = localTrack.Write(rtpBuf[:i]); err != nil && err != io.ErrClosedPipe {
+					panic(err)
+				}
 			}
 		}
 	})
@@ -207,38 +259,39 @@ func main2() {
 		Decode(output, &recvOnlyOffer)
 		log.Println("[+] Offer:\r\n", recvOnlyOffer)
 
-		parsed := sdp.SessionDescription{}
-		if err := parsed.Unmarshal([]byte(recvOnlyOffer.SDP)); err != nil {
-			log.Println("[ERROR]", err)
-			continue
-		}
+		//createWebrtcApiWithOffer(&recvOnlyOffer)
+		recvApi := createWebrtcApiWithOffer(&recvOnlyOffer)
 
 		// Create a new PeerConnection
-		peerConnection, err := api.NewPeerConnection(peerConnectionConfig)
+		peerConnection, err := recvApi.NewPeerConnection(peerConnectionConfig)
 		if err != nil {
 			log.Println(err)
 			continue
 		}
 
-		//config := peerConnection.GetConfiguration()
-		//config.SDPSemantics = webrtc.SDPSemanticsPlanB
-		//log.Println(config)
-		//peerConnection.SetConfiguration(config)
-		//peerConnection.GetConfiguration()
+		var videoTrack, audioTrack *webrtc.Track
 
-		_, err = peerConnection.AddTrack(localTrack1)
+		if localTrack1.Kind() == webrtc.RTPCodecTypeVideo {
+			audioTrack = localTrack2
+			videoTrack = localTrack1
+		} else if localTrack2.Kind() == webrtc.RTPCodecTypeVideo {
+			audioTrack = localTrack1
+			videoTrack = localTrack2
+		}
+
+		_, err = peerConnection.AddTrack(audioTrack)
 		if err != nil {
 			log.Println(err)
 			continue
 		}
-		log.Println("[+] Added localTrack1")
+		log.Println("[+] Added audioTrack")
 
-		_, err = peerConnection.AddTrack(localTrack2)
+		_, err = peerConnection.AddTrack(videoTrack)
 		if err != nil {
 			log.Println(err)
 			continue
 		}
-		log.Println("[+] Added localTrack2")
+		log.Println("[+] Added videoTrack")
 
 		// Set the remote SessionDescription
 		err = peerConnection.SetRemoteDescription(recvOnlyOffer)
@@ -262,13 +315,120 @@ func main2() {
 		}
 		log.Println("[+] Answer:\r\n", answer)
 
-		mediaDescriptionLen := len(parsed.MediaDescriptions)
-		log.Println("[+] parsed MD length:", mediaDescriptionLen)
-		log.Println("[+] MD[0]:", parsed.MediaDescriptions[0].MediaName.Media)
+		log.Println("[+] Audio track codec:", audioTrack.Codec())
+		log.Println("[+] Video track codec:", videoTrack.Codec())
+		//log.Println("[+] Local track 1:", localTrack1.Codec())
+		//log.Println("[+] Local track 2:", localTrack2.Codec())
 
 		// Get the LocalDescription and take it to base64 so we can paste in browser
 		localDesc := Encode(answer)
 		log.Println(localDesc)
 		respChan <- localDesc
 	}
+}
+
+type rtpmap struct {
+	rtpmap string
+	fmtp   string
+}
+
+// Create an API
+func createWebrtcApiWithOffer(sd *webrtc.SessionDescription) *webrtc.API {
+	parsed := sdp.SessionDescription{}
+	if err := parsed.Unmarshal([]byte(sd.SDP)); err != nil {
+		log.Println("[ERROR]", err)
+	}
+
+	mediaDescriptionLen := len(parsed.MediaDescriptions)
+	log.Println("[+] parsed MD length:", mediaDescriptionLen)
+
+	m := webrtc.MediaEngine{}
+
+	recvMap := make(map[int]*rtpmap)
+	setRecvRtpmap(parsed.MediaDescriptions, recvMap)
+
+	name, payloadType, fmtp, ok := getAvailableVideoTypeByName(recvMap)
+	log.Printf("[+] Available video name:[%s] payload type:[%d] fmtp:[%s]", name, payloadType, fmtp)
+	if !ok {
+		m.RegisterDefaultCodecs()
+	} else {
+		//m.RegisterCodec(webrtc.NewRTPCodec(webrtc.RTPCodecTypeVideo, name, 90000,
+		//	0, fmtp, uint8(payloadType), getPayloader(name)))
+		m.RegisterCodec(webrtc.NewRTPVP8Codec(96, 90000))
+		m.RegisterCodec(MyRTPH264Codec(102, 90000))
+		m.RegisterCodec(webrtc.NewRTPOpusCodec(webrtc.DefaultPayloadTypeOpus, 48000))
+	}
+	return webrtc.NewAPI(webrtc.WithMediaEngine(m))
+}
+
+func getPayloader(name string) rtp.Payloader {
+	switch name {
+	case "VP8":
+		return &codecs.VP8Payloader{}
+	case "H264":
+		return &codecs.H264Payloader{}
+	}
+	return nil
+}
+
+func setRecvRtpmap(mds []*sdp.MediaDescription, recvMap map[int]*rtpmap) {
+	for i, md := range mds {
+		log.Println("[+] MD index:", i, "MediaName.Media:", md.MediaName.Media)
+		if md.MediaName.Media == "video" {
+			log.Printf("[+] Video attributes:\r\n")
+			for i, attr := range md.Attributes {
+				if attr.Key == "rtpmap" || attr.Key == "fmtp" {
+					log.Printf("[%d] Key:[%s] Value:[%s]", i, attr.Key, attr.Value)
+					if payloadType, rest, ok := splitAttributeValue(attr.Value); ok {
+						if attr.Key == "rtpmap" {
+							v, ok := recvMap[payloadType]
+							if ok {
+								v.rtpmap = rest
+							} else {
+								recvMap[payloadType] = &rtpmap{rtpmap: rest}
+							}
+						} else if attr.Key == "fmtp" {
+							v, ok := recvMap[payloadType]
+							if ok {
+								log.Printf("[+] Rest:[%s]", rest)
+								v.fmtp = rest
+							} else {
+								recvMap[payloadType] = &rtpmap{fmtp: rest}
+							}
+						}
+					} else {
+						log.Printf("[ERROR]")
+					}
+				}
+			}
+		}
+	}
+}
+
+func getAvailableVideoTypeByName(recvMap map[int]*rtpmap) (name string, payloadType int, fmtp string, ok bool) {
+	for k, v := range recvMap {
+		if strings.HasPrefix(v.rtpmap, "VP8") {
+			return "VP8", k, "", true
+		} else if strings.HasPrefix(v.rtpmap, "H264") {
+			return "H264", k, v.fmtp, true
+		}
+	}
+	return "", 0, "", false
+}
+
+func splitAttributeValue(v string) (payloadType int, rest string, ok bool) {
+	ok = false
+	index := strings.IndexByte(v, ' ')
+	if index < 0 {
+		return
+	}
+	payloadTypeStr := v[:index]
+	rest = v[index+1:]
+	if pt, err := strconv.Atoi(payloadTypeStr); err != nil {
+		return
+	} else {
+		payloadType = pt
+		ok = true
+	}
+	return
 }
