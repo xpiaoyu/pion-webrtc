@@ -86,7 +86,7 @@ func main2() {
 
 	// Setup the codecs you want to use.
 	// Only support VP8, this makes our proxying code simpler
-	m.RegisterCodec(MyRTPH264Codec(102, 90000))
+	//m.RegisterCodec(MyRTPH264Codec(102, 90000))
 	m.RegisterCodec(webrtc.NewRTPVP8Codec(webrtc.DefaultPayloadTypeVP8, 90000))
 	//m.RegisterCodec(webrtc.NewRTPVP8Codec(100, 90000))
 	m.RegisterCodec(webrtc.NewRTPOpusCodec(webrtc.DefaultPayloadTypeOpus, 48000))
@@ -101,7 +101,6 @@ func main2() {
 	for {
 		select {
 		case output = <-sdpChan:
-			// 如果chan1成功读到数据，则进行该case处理语句
 		default:
 		}
 		if restart {
@@ -115,14 +114,14 @@ func main2() {
 		}
 	}
 	Decode(output, &offer)
-	log.Println("[+] Client offer:\r\n", offer)
+	log.Println("[!] Client offer:\r\n", offer)
 
 	// Create a new RTCPeerConnection
 	peerConnection, err := api.NewPeerConnection(peerConnectionConfig)
 	if err != nil {
 		panic(err)
 	}
-	log.Print("[+] Got peerConnection:", peerConnection)
+	log.Print("[!] Got peerConnection:", peerConnection)
 
 	// Allow us to receive 1 audio track
 	if _, err = peerConnection.AddTransceiver(webrtc.RTPCodecTypeAudio); err != nil {
@@ -141,13 +140,13 @@ func main2() {
 	peerConnection.OnTrack(func(remoteTrack *webrtc.Track, receiver *webrtc.RTPReceiver) {
 		// Send a PLI on an interval so that the publisher is pushing a keyframe every rtcpPLIInterval
 		// This can be less wasteful by processing incoming RTCP events, then we would emit a NACK/PLI when a viewer requests it
-		log.Println("[+] OnTrack remoteTrack:", remoteTrack)
-		log.Printf("[+] Remote track codec name:[%s] payloadType:[%d]", remoteTrack.Codec().Name, remoteTrack.Codec().PayloadType)
+		log.Println("[!] OnTrack remoteTrack:", remoteTrack)
+		log.Printf("[!] Remote track codec name:[%s] payloadType:[%d]", remoteTrack.Codec().Name, remoteTrack.Codec().PayloadType)
 
 		if remoteTrack.PayloadType() == webrtc.DefaultPayloadTypeVP8 || remoteTrack.PayloadType() == webrtc.DefaultPayloadTypeVP9 ||
 			remoteTrack.PayloadType() == webrtc.DefaultPayloadTypeH264 {
 			broadcastVideoName = remoteTrack.Codec().Name
-			log.Printf("[+] Video codec name:[%s]", broadcastVideoName)
+			log.Printf("[!] Video codec name:[%s]", broadcastVideoName)
 			go func() {
 				ticker := time.NewTicker(rtcpPLIInterval)
 				for range ticker.C {
@@ -179,8 +178,13 @@ func main2() {
 				}
 				for _, track := range receiverTacks {
 					packet.Header.PayloadType = track.PayloadType()
-					if err := track.WriteRTP(packet); err != nil && err != io.ErrClosedPipe {
-						panic(err)
+					if err := track.WriteRTP(packet); err != nil {
+						if err == io.ErrClosedPipe {
+							log.Printf("[!] ErrClosedPipe track ID:[%s]", track.ID())
+						} else {
+							// Unexpected error, panic for test
+							panic(err)
+						}
 					}
 				}
 
@@ -217,7 +221,7 @@ func main2() {
 	if err != nil {
 		log.Println(err)
 	}
-	log.Println("[+] Set remote description")
+	log.Println("[!] Set remote description")
 
 	// Create answer
 	answer, err := peerConnection.CreateAnswer(nil)
@@ -225,14 +229,14 @@ func main2() {
 		log.Println(err)
 	}
 	//answer.SDP = strings.Replace(answer.SDP, "42001f", "42e01f", -1)
-	log.Println("[+] Created server answer:\r\n", answer)
+	log.Println("[!] Created server answer:\r\n", answer)
 
 	// Sets the LocalDescription, and starts our UDP listeners
 	err = peerConnection.SetLocalDescription(answer)
 	if err != nil {
 		log.Println(err)
 	}
-	log.Println("[+] Set local description")
+	log.Println("[!] Set local description")
 
 	// Get the LocalDescription and take it to base64 so we can paste in browser
 	serverLocalDesc := Encode(answer)
@@ -242,9 +246,9 @@ func main2() {
 	// N broadcasters will create 2*N tracks
 	// each one create one audio track and one video track
 	localTrack1 := <-localTrackChan
-	log.Println("[+] Got track 1 waiting track 2")
+	log.Println("[!] Got track 1 waiting track 2")
 	localTrack2 := <-localTrackChan
-	log.Println("[+] Got track 2")
+	log.Println("[!] Got track 2")
 
 	for !restart {
 		log.Println("Curl an base64 SDP to start send-only peer connection")
@@ -255,7 +259,6 @@ func main2() {
 		for {
 			select {
 			case output = <-sdpChan:
-				// 如果chan1成功读到数据，则进行该case处理语句
 			default:
 			}
 			if restart {
@@ -268,7 +271,7 @@ func main2() {
 			}
 		}
 		Decode(output, &recvOnlyOffer)
-		log.Println("[+] Offer:\r\n", recvOnlyOffer)
+		log.Println("[DEBUG] Offer:\r\n", recvOnlyOffer)
 
 		//createWebrtcApiWithOffer(&recvOnlyOffer)
 		recvApi, payloadType := createWebrtcApiWithOffer(&recvOnlyOffer, broadcastVideoName)
@@ -296,6 +299,7 @@ func main2() {
 			continue
 		}
 		receiverTacks = append(receiverTacks, newTrack)
+		log.Printf("[+] New client connected, current tracks num: %d", len(receiverTacks))
 
 		_, err = peerConnection.AddTrack(audioTrack)
 		if err != nil {
@@ -310,6 +314,19 @@ func main2() {
 			continue
 		}
 		log.Println("[+] Added videoTrack")
+
+		peerConnection.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+			log.Printf("ICEConnectionState changed:[%s]", state.String())
+			if state.String() == "disconnected" {
+				log.Printf("[-] Client disconnected removing track ID:[%s]", newTrack.ID())
+				for k, v := range receiverTacks {
+					if v == newTrack {
+						receiverTacks = append(receiverTacks[:k], receiverTacks[k+1:]...)
+					}
+				}
+				log.Printf("[-] Track removed, current track num: %d", len(receiverTacks))
+			}
+		})
 
 		// Set the remote SessionDescription
 		err = peerConnection.SetRemoteDescription(recvOnlyOffer)
@@ -331,11 +348,11 @@ func main2() {
 			log.Println(err)
 			continue
 		}
-		log.Println("[+] Answer:\r\n", answer)
+		log.Println("[DEBUG] Answer:\r\n", answer)
 
-		log.Println("[+] Audio track codec:", audioTrack.Codec())
-		log.Println("[+] Video track codec:", videoTrack.Codec())
-		log.Println("[+] New   track codec:", newTrack.Codec())
+		log.Println("[!] Audio track codec:", audioTrack.Codec())
+		log.Println("[!] Video track codec:", videoTrack.Codec())
+		log.Println("[!] New   track codec:", newTrack.Codec())
 		//log.Println("[+] Local track 1:", localTrack1.Codec())
 		//log.Println("[+] Local track 2:", localTrack2.Codec())
 
@@ -359,7 +376,7 @@ func createWebrtcApiWithOffer(sd *webrtc.SessionDescription, name string) (*webr
 	}
 
 	mediaDescriptionLen := len(parsed.MediaDescriptions)
-	log.Println("[+] parsed MD length:", mediaDescriptionLen)
+	log.Println("[!] parsed MD length:", mediaDescriptionLen)
 
 	m := webrtc.MediaEngine{}
 
@@ -367,11 +384,12 @@ func createWebrtcApiWithOffer(sd *webrtc.SessionDescription, name string) (*webr
 	setRecvRtpmap(parsed.MediaDescriptions, recvMap)
 
 	name, payloadType, fmtp, ok := getAvailableVideoTypeByName(recvMap, name)
-	log.Printf("[+] Available video name:[%s] payload type:[%d] fmtp:[%s]", name, payloadType, fmtp)
 	if !ok {
+		log.Printf("[WARN] Cannot find available codec, fallback to default codecs")
 		m.RegisterDefaultCodecs()
 		payloadType = 96
 	} else {
+		log.Printf("[!] Available video name:[%s] payload type:[%d] fmtp:[%s]", name, payloadType, fmtp)
 		m.RegisterCodec(webrtc.NewRTPCodec(webrtc.RTPCodecTypeVideo, name, 90000,
 			0, fmtp, uint8(payloadType), getPayloader(name)))
 		//m.RegisterCodec(webrtc.NewRTPVP8Codec(96, 90000))
@@ -393,9 +411,9 @@ func getPayloader(name string) rtp.Payloader {
 
 func setRecvRtpmap(mds []*sdp.MediaDescription, recvMap map[int]*rtpmap) {
 	for i, md := range mds {
-		log.Println("[+] MD index:", i, "MediaName.Media:", md.MediaName.Media)
+		log.Println("[!] MediaDescription index:", i, "MediaName.Media:", md.MediaName.Media)
 		if md.MediaName.Media == "video" {
-			log.Printf("[+] Video attributes:\r\n")
+			log.Printf("[!] Video attributes:\r\n")
 			for i, attr := range md.Attributes {
 				if attr.Key == "rtpmap" || attr.Key == "fmtp" {
 					log.Printf("[%d] Key:[%s] Value:[%s]", i, attr.Key, attr.Value)
@@ -410,7 +428,7 @@ func setRecvRtpmap(mds []*sdp.MediaDescription, recvMap map[int]*rtpmap) {
 						} else if attr.Key == "fmtp" {
 							v, ok := recvMap[payloadType]
 							if ok {
-								log.Printf("[+] Rest:[%s]", rest)
+								log.Printf("[!] Rest:[%s]", rest)
 								v.fmtp = rest
 							} else {
 								recvMap[payloadType] = &rtpmap{fmtp: rest}

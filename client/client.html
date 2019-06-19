@@ -1,4 +1,3 @@
-
 <html>
 <header>
   <script src="https://cdn.staticfile.org/jquery/3.4.1/jquery.min.js"></script>
@@ -13,14 +12,16 @@
     <br />
     <textarea id="remoteSessionDescription"></textarea>
     <br />
-    <button onclick="window.startSession()"> Start Session </button>
+    <button onclick="startSession()"> Start Session </button>
     <br />
   </div>
 
   <br /> Video
 
   <br />
-  <video id="video1" width="160" height="120" autoplay muted></video>
+  <video id="video1" playsinline autoplay muted></video>
+  <br />
+  <video id="video2" width="160" height="120" playsinline autoplay muted></video>
   <br />
 
   <button class="createSessionButton" onclick="start(true)"> Publish a Broadcast </button>
@@ -38,6 +39,8 @@
     }
 
     let pc
+
+    log('123')
 
     function getDisplayMedia() {
       if (navigator.getDisplayMedia) {
@@ -58,14 +61,16 @@
       return navigator.mediaDevices.getUserMedia(constraints);
     }
 
+    // mv.piaoyu.org
+    // 52.68.64.213
     function start(sender) {
       pc = new RTCPeerConnection({
         iceServers: [{
-          urls: "turn:52.68.64.213:3478",
+          urls: "turn:mv.piaoyu.org:3478",
           username: "test",
           credential: "test"
-        }], 
-        // sdpSemantics: 'unified-plan'
+        }],
+        sdpSemantics: 'unified-plan'
       })
       pc.oniceconnectionstatechange = onStateChange
       pc.onicecandidate = onIceCandidate
@@ -75,43 +80,71 @@
           .then(stream => {
             document.getElementById('video1').srcObject = stream
             stream.getTracks().forEach(function (track) {
-              peerConnection.addTrack(track, stream)
+              pc.addTrack(track, stream)
             })
             // pc.addStream(document.getElementById('video1').srcObject = stream)
             pc.createOffer()
               .then(d => pc.setLocalDescription(d))
               .catch(log)
             console.log('[+] created offer sender side')
+            log('[+] Created offer')
           }).catch(log)
       } else {
-        pc.addTransceiver('video', {
-          // 'direction': 'recvonly'
-        })
-        pc.addTransceiver('audio', {
-          // 'direction': 'recvonly'
-        })
-        pc.createOffer()
-          .then(function (d) {
-            console.log('[+] setLocalDescription')
-            pc.setLocalDescription(d)
-            // document.getElementById('localSessionDescription').value = btoa(JSON.stringify(pc.localDescription))
-            // $.post('https://aes-cdn.piaoyu.org/sdp', document.getElementById('localSessionDescription').value, function (data, status) {
-            //   console.log('data:', data, 'status', status)
-            //   document.getElementById('remoteSessionDescription').value = data
-            //   startSession()
-            // })
+        try {
+          let stream = new MediaStream()
+          // pc.addStream(stream)
+          //
+          pc.addTransceiver('video', {
+            // 'direction': 'recvonly'
           })
-          .catch(function (e) {
-            console.log('[-] e:', e)
+          pc.addTransceiver('audio', {
+            // 'direction': 'recvonly'
           })
+          log('[+] Added transceiver')
+        } catch (e) {
+          log('[!] Add transceiver error: ' + e)
+        }
 
         pc.ontrack = function (event) {
-          console.log('[+] Got remote stream')
+          log('[+] Got remote stream')
           let el = document.getElementById('video1')
-          el.srcObject = event.streams[0]
-          el.autoplay = true
-          el.controls = true
+          if (false) {
+            // let v2 = document.getElementById('video2')
+            // v2.autoplay = true
+            // v2.controls = true
+            // v2.muted = false
+            // v2.srcObject = event.streams[0]
+            // log('v2')
+          } else {
+            stream = event.streams[0]
+            // if (stream.getTracks().length < 2) return
+            el.srcObject = stream
+            el.play()
+            el.autoplay = true
+            el.controls = true
+            el.muted = false
+            console.log(stream.getTracks())
+            log('[+] Tracks num: ' + stream.getTracks().length)
+            log('[+] Track1' +
+              ' kind:' + stream.getTracks()[0].kind +
+              ' readyState:' + stream.getTracks()[0].readyState +
+              ' enabled:' + stream.getTracks()[0].enabled)
+            log('[+] Track2' +
+              ' kind:' + stream.getTracks()[1].kind +
+              ' readyState:' + stream.getTracks()[1].readyState +
+              ' enabled:' + stream.getTracks()[1].enabled)
+          }
+          log('Streams length: ' + event.streams.length)
         }
+
+        pc.createOffer()
+          .then(function (d) {
+            log('[+] setLocalDescription')
+            pc.setLocalDescription(d)
+          })
+          .catch(function (e) {
+            log('[-] e: ' + e)
+          })
       }
 
       let btns = document.getElementsByClassName('createSessionButton')
@@ -123,12 +156,12 @@
     }
 
     function onIceCandidate(event) {
-      console.log('[+] onIceCandidate')
+      log('[+] onIceCandidate')
       if (event.candidate === null) {
         document.getElementById('localSessionDescription').value = btoa(JSON.stringify(pc.localDescription))
         // http://localhost:8080/sdp
         // https://aes-cdn.piaoyu.org/sdp
-        $.post('http://192.168.50.78:8080/sdp', document.getElementById('localSessionDescription').value, function (data, status) {
+        $.post('./sdp', document.getElementById('localSessionDescription').value, function (data, status) {
           console.log('data:', data, 'status', status)
           document.getElementById('remoteSessionDescription').value = data
           startSession()
@@ -137,13 +170,17 @@
     }
 
     function startSession() {
+      log('[*] Starting session')
       let sd = document.getElementById('remoteSessionDescription').value
       if (sd === '') {
         return alert('Session Description must not be empty')
       }
 
       try {
-        pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(atob(sd))))
+        log('[*] Try set remote description')
+        pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(atob(sd)))).then(function () {
+          log('[+] Remote description set')
+        }).catch(log)
       } catch (e) {
         alert(e)
       }
@@ -180,7 +217,11 @@
           audio: true
         })
           .then(stream => {
-            pc.addStream(document.getElementById('video1').srcObject = stream)
+            document.getElementById('video1').srcObject = stream
+            stream.getTracks().forEach(function (track) {
+              pc.addTrack(track, stream)
+            })
+            // pc.addStream(document.getElementById('video1').srcObject = stream)
             pc.createOffer()
               .then(d => pc.setLocalDescription(d))
               .catch(log)
@@ -205,7 +246,7 @@
         }
       }
 
-      window.startSession = () => {
+      window.startSession2 = () => {
         let sd = document.getElementById('remoteSessionDescription').value
         if (sd === '') {
           return alert('Session Description must not be empty')
