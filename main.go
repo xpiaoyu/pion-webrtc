@@ -86,7 +86,7 @@ func main2() {
 
 	// Setup the codecs you want to use.
 	// Only support VP8, this makes our proxying code simpler
-	//m.RegisterCodec(MyRTPH264Codec(102, 90000))
+	m.RegisterCodec(MyRTPH264Codec(102, 90000))
 	m.RegisterCodec(webrtc.NewRTPVP8Codec(webrtc.DefaultPayloadTypeVP8, 90000))
 	//m.RegisterCodec(webrtc.NewRTPVP8Codec(100, 90000))
 	m.RegisterCodec(webrtc.NewRTPOpusCodec(webrtc.DefaultPayloadTypeOpus, 48000))
@@ -167,9 +167,19 @@ func main2() {
 
 			rtpBuf := make([]byte, 1400)
 			for {
+				//log.Println("[DEBUG] Read begin")
+				now := time.Now()
 				i, readErr := remoteTrack.Read(rtpBuf)
 				if readErr != nil {
 					panic(readErr)
+				}
+				if i == 0 {
+					continue
+				}
+				costTime := time.Now().Sub(now).Nanoseconds() / 1e6
+				if costTime > 200 {
+					log.Printf("[DEBUG] Slow track.Read cost: %d ms", costTime)
+					log.Printf("[DEBUG] Packet size: %d", i)
 				}
 				packet := &rtp.Packet{}
 				err = packet.Unmarshal(rtpBuf[:i])
