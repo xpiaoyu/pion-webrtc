@@ -28,8 +28,9 @@ var peerConnectionConfig = webrtc.Configuration{
 }
 
 const (
-	rtcpPLIInterval = time.Second * 3
+	rtcpPLIInterval = time.Millisecond * 1000
 	h264Fmtp        = "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+	maxBitrate      = 1024 * 1024 // 1MBit/s
 )
 
 var respChan = make(chan string)
@@ -42,6 +43,18 @@ var broadcastVideoName string
 
 var receiverTacks []*webrtc.Track
 
+var RtcpVideoFeedback = []webrtc.RTCPFeedback{
+	{"goog-remb", ""},
+	//{"transport-cc", ""},
+	{"ccm", "fir"},
+	{"nack", ""},
+	{"nack", "pli"},
+}
+
+var RtcpAudioFeedback = []webrtc.RTCPFeedback{
+	//{"transport-cc", ""},
+}
+
 func main() {
 	sdpChan = HTTPSDPServer()
 	for {
@@ -52,15 +65,55 @@ func main() {
 	}
 }
 
-func MyRTPH264Codec(payloadType uint8, clockRate uint32) *webrtc.RTPCodec {
-	c := webrtc.NewRTPCodec(webrtc.RTPCodecTypeVideo,
-		"H264",
-		clockRate,
-		0,
-		h264Fmtp,
-		payloadType,
-		&codecs.H264Payloader{})
-	return c
+func MyRTPH264Codec(payloadType uint8) *webrtc.RTPCodec {
+	codecType := webrtc.RTPCodecTypeVideo
+	return &webrtc.RTPCodec{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:     codecType.String() + "/" + "H264",
+			ClockRate:    90000,
+			Channels:     0,
+			SDPFmtpLine:  h264Fmtp,
+			RTCPFeedback: RtcpVideoFeedback,
+		},
+		PayloadType: payloadType,
+		Payloader:   &codecs.H264Payloader{},
+		Type:        codecType,
+		Name:        "H264",
+	}
+}
+
+func MyVP8Codec(payloadType uint8) *webrtc.RTPCodec {
+	codecType := webrtc.RTPCodecTypeVideo
+	return &webrtc.RTPCodec{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:     codecType.String() + "/" + "VP8",
+			ClockRate:    90000,
+			Channels:     0,
+			SDPFmtpLine:  "",
+			RTCPFeedback: RtcpVideoFeedback,
+		},
+		PayloadType: payloadType,
+		Payloader:   &codecs.VP8Payloader{},
+		Type:        codecType,
+		Name:        "VP8",
+	}
+}
+
+func MyOpusCodec(payloadType uint8) *webrtc.RTPCodec {
+	codecType := webrtc.RTPCodecTypeAudio
+	return &webrtc.RTPCodec{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType:     codecType.String() + "/" + "VP8",
+			ClockRate:    48000,
+			Channels:     2,
+			SDPFmtpLine:  "minptime=10;useinbandfec=1",
+			RTCPFeedback: RtcpAudioFeedback,
+		},
+		PayloadType: payloadType,
+		Payloader:   &codecs.OpusPayloader{},
+		Type:        codecType,
+		Name:        "opus",
+	}
 }
 
 // DefaultPayloadTypeVP8  = 96
@@ -86,10 +139,10 @@ func main2() {
 
 	// Setup the codecs you want to use.
 	// Only support VP8, this makes our proxying code simpler
-	m.RegisterCodec(MyRTPH264Codec(102, 90000))
-	m.RegisterCodec(webrtc.NewRTPVP8Codec(webrtc.DefaultPayloadTypeVP8, 90000))
+	m.RegisterCodec(MyRTPH264Codec(webrtc.DefaultPayloadTypeH264))
+	m.RegisterCodec(MyVP8Codec(webrtc.DefaultPayloadTypeVP8))
 	//m.RegisterCodec(webrtc.NewRTPVP8Codec(100, 90000))
-	m.RegisterCodec(webrtc.NewRTPOpusCodec(webrtc.DefaultPayloadTypeOpus, 48000))
+	m.RegisterCodec(MyOpusCodec(webrtc.DefaultPayloadTypeOpus))
 	//m.RegisterCodec(webrtc.NewRTPG722Codec(webrtc.DefaultPayloadTypeG722, 8000))
 	//m.RegisterDefaultCodecs()
 
@@ -150,7 +203,10 @@ func main2() {
 			go func() {
 				ticker := time.NewTicker(rtcpPLIInterval)
 				for range ticker.C {
-					if rtcpSendErr := peerConnection.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: remoteTrack.SSRC()}}); rtcpSendErr != nil {
+					if rtcpSendErr := peerConnection.WriteRTCP([]rtcp.Packet{
+						&rtcp.PictureLossIndication{MediaSSRC: remoteTrack.SSRC()},
+						&rtcp.ReceiverEstimatedMaximumBitrate{Bitrate: maxBitrate, SSRCs: []uint32{remoteTrack.SSRC()}},
+					}); rtcpSendErr != nil {
 						log.Println("[ERROR]", rtcpSendErr)
 					}
 				}
@@ -173,12 +229,9 @@ func main2() {
 				if readErr != nil {
 					panic(readErr)
 				}
-				if i == 0 {
-					continue
-				}
 				costTime := time.Now().Sub(now).Nanoseconds() / 1e6
-				if costTime > 200 {
-					log.Printf("[DEBUG] Slow track.Read cost: %d ms", costTime)
+				if costTime > 300 {
+					log.Printf("[DEBUG] Freeze deteted slow track.Read cost: %d ms", costTime)
 					log.Printf("[DEBUG] Packet size: %d", i)
 				}
 				packet := &rtp.Packet{}
@@ -400,11 +453,11 @@ func createWebrtcApiWithOffer(sd *webrtc.SessionDescription, name string) (*webr
 		payloadType = 96
 	} else {
 		log.Printf("[!] Available video name:[%s] payload type:[%d] fmtp:[%s]", name, payloadType, fmtp)
-		m.RegisterCodec(webrtc.NewRTPCodec(webrtc.RTPCodecTypeVideo, name, 90000,
-			0, fmtp, uint8(payloadType), getPayloader(name)))
-		//m.RegisterCodec(webrtc.NewRTPVP8Codec(96, 90000))
-		//m.RegisterCodec(MyRTPH264Codec(98, 90000))
-		m.RegisterCodec(webrtc.NewRTPOpusCodec(webrtc.DefaultPayloadTypeOpus, 48000))
+		codec := webrtc.NewRTPCodec(webrtc.RTPCodecTypeVideo, name, 90000,
+			0, fmtp, uint8(payloadType), getPayloader(name))
+		codec.RTCPFeedback = RtcpVideoFeedback
+		m.RegisterCodec(codec)
+		m.RegisterCodec(MyOpusCodec(webrtc.DefaultPayloadTypeOpus))
 	}
 	return webrtc.NewAPI(webrtc.WithMediaEngine(m)), payloadType
 }
